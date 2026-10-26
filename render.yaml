@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: feedia-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: HF_TOKEN
+        sync: false

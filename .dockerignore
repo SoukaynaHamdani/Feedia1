@@ -1,0 +1,8 @@
+node_modules
+dist
+asr-venv
+tts-venv
+images
+.env
+backend/pdf
+backend/__pycache__
