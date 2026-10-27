@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import time
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,13 +52,16 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # Prefer Groq if available, fallback to Gemini
 if GROQ_API_KEY:
     print("Using Groq (Llama-3.3) for AI generation...")
-    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0.2, groq_api_key=GROQ_API_KEY)
+    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0.2, groq_api_key=GROQ_API_KEY,
+                   reasoning_effort="low")
+    fast_llm = llm
 elif GOOGLE_API_KEY:
     print("Using Google (Gemini) for AI generation...")
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2)
 else:
     print("Warning: No LLM API Key found!")
     llm = None
+fast_llm = globals().get("fast_llm") or llm
 
 
 def clean_reply(text: str) -> str:
@@ -71,14 +76,21 @@ def clean_reply(text: str) -> str:
 def retrieval_query(text: str, history: list | None = None) -> str:
     """The PDF index is English (all-MiniLM-L6-v2): turn the question (any language, possibly a
     follow-up like "and how much water?") into a standalone English search query."""
-    if not llm:
+    if not fast_llm:
         return text
+    if not history and re.search(r"[؀-ۿ]", text):
+        kw = voice.darija_keywords(text)
+        if kw:
+            return kw  # local keyword mapping: no LLM call needed
+    if not history and not re.search(r"[^\x00-\x7f]", text) and voice.detect_text_lang(text) == "en":
+        return text  # already a standalone English question: skip the LLM call
     convo = "\n".join(f"{m.get('role', 'user')}: {m.get('text', '')}" for m in (history or [])[-6:])
     try:
-        out = llm.invoke(
+        out = fast_llm.invoke(
             "Rewrite the user's last message as ONE short, standalone English search query about "
             "livestock/farming for a document search. Resolve references (it, them, and, also) using the "
-            "conversation. The message may be Moroccan Darija, French or English. Output only the query.\n\n"
+            "conversation. The message may be Moroccan Darija, French or English. Darija glossary: غنم/الغنمة/لحولي=sheep, "
+            "بقرة=cow, معزة=goat, دجاج/الطيور=chickens, علف=feed, ما=water, شحال=how much. Output only the query.\n\n"
             f"Conversation:\n{convo}\n\nLast message: {text}"
         )
         return (out.content or "").strip() or text
@@ -207,12 +219,26 @@ CRITICAL RULES:
         print(f"Raw response was: {response.content if 'response' in locals() else 'None'}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _warmup():
+    """Open the LLM/vector-store connections at startup so the first real request isn't slow."""
+    try:
+        retriever.invoke("sheep water")
+        if llm:
+            llm.invoke("ok")
+    except Exception as e:
+        print(f"Warmup skipped: {e}")
+
+
+import threading
+threading.Thread(target=_warmup, daemon=True).start()
+
+
 def answer(question: str, lang: str, from_audio: bool = False, history: list | None = None) -> str:
     docs = retriever.invoke(retrieval_query(question, history))
     context = "\n\n".join(d.page_content for d in docs)
     convo = "\n".join(f"{m.get('role', 'user')}: {m.get('text', '')}" for m in (history or [])[-6:])
     label = "User question (transcribed from audio, may contain small speech errors)" if from_audio else "Question"
-    prompt = f"""You are a helpful agricultural AI assistant for Moroccan livestock farmers. Answer in at most 3 short sentences, in plain conversational text. Do NOT use markdown, asterisks, bullet points or numbered lists.
+    prompt = f"""You are a helpful agricultural AI assistant for Moroccan livestock farmers. Answer in at most 2 short sentences, in plain conversational text. Do NOT use markdown, asterisks, bullet points or numbered lists.
 Answer exactly what the user asked, using the conversation so far to understand follow-ups. Use the Context only where it is relevant to the question; ignore parts that are not. If the context does not contain the answer, say so briefly instead of answering about something else. If the question is not about farming or livestock, say you can only help with livestock.
 {voice.reply_prompt(lang)}
 
@@ -257,12 +283,14 @@ async def voice_chat(audio: UploadFile = File(...), language: str = Form("auto")
         raise HTTPException(status_code=400, detail="The uploaded audio file is empty.")
 
     # 1. ASR (auto-detects the spoken language unless one was picked)
+    t0 = time.time()
     text, lang = voice.transcribe(
         audio_bytes, audio.filename or "audio.webm", audio.content_type or "audio/webm", language
     )
     if not text:
         raise HTTPException(status_code=502, detail="Speech transcription failed for the configured models.")
 
+    t1 = time.time()
     # 2. RAG answer in the language the user spoke
     try:
         hist = json.loads(history)
@@ -276,6 +304,7 @@ async def voice_chat(audio: UploadFile = File(...), language: str = Form("auto")
             detail="The AI service failed to process the transcribed request.",
         ) from error
 
+    print(f"[voice-chat] asr={t1 - t0:.1f}s answer={time.time() - t1:.1f}s lang={lang}")
     # 3. TTS is generated on demand by the frontend via /api/tts
     return {"transcription": text, "response": ai_text, "language": lang, "audio_base64": None}
 

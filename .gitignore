@@ -44,3 +44,8 @@ chroma_db/
 asr-venv/
 tts-venv/
 __pycache__/
+
+# Deploy: raw PDFs are not needed at runtime (index is in backend/chroma_db_pdf)
+backend/pdf/
+images/
+.venv/
