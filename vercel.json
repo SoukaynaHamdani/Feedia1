@@ -7,7 +7,11 @@
       "destination": "https://feedia1.onrender.com/api/:path*"
     },
     {
-      "source": "/((?!api/).*)",
+      "source": "/google-tts/:path*",
+      "destination": "https://translate.google.com/:path*"
+    },
+    {
+      "source": "/((?!api/|google-tts/).*)",
       "destination": "/index.html"
     }
   ]
